@@ -1,0 +1,54 @@
+name: Private-target availability monitor
+
+on:
+  schedule:
+    # Five-minute polling, offset from the busiest top-of-hour period.
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: availability-monitor
+  cancel-in-progress: false
+
+jobs:
+  check-availability:
+    runs-on: ubuntu-slim
+    timeout-minutes: 3
+    steps:
+      - name: Check out monitor
+        # actions/checkout v6.0.2, pinned to an immutable commit.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Check availability
+        id: stock
+        env:
+          MONITOR_API_URL: ${{ secrets.MONITOR_API_URL }}
+          MONITOR_PRODUCT_ID: ${{ secrets.MONITOR_PRODUCT_ID }}
+          MONITOR_PRODUCT_SKU: ${{ secrets.MONITOR_PRODUCT_SKU }}
+          MONITOR_PRODUCT_SLUG: ${{ secrets.MONITOR_PRODUCT_SLUG }}
+        run: python3 scripts/check_stock.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Create or close the stock-alert issue
+        id: alert
+        env:
+          STOCK_STATUS: ${{ steps.stock.outputs.status }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ALERT_ASSIGNEE: ${{ vars.ALERT_ASSIGNEE || github.actor }}
+        run: python3 scripts/sync_github_issue.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        env:
+          STOCK_STATUS: ${{ steps.stock.outputs.status }}
+          ALERT_ACTION: ${{ steps.alert.outputs.action }}
+          ISSUE_URL: ${{ steps.alert.outputs.issue_url }}
+        run: |
+          echo "## Private-target availability check" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: **$STOCK_STATUS**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Alert action: **$ALERT_ACTION**" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ISSUE_URL" ]; then echo "- Alert: $ISSUE_URL" >> "$GITHUB_STEP_SUMMARY"; fi
