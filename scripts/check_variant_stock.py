@@ -21,6 +21,15 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 class VariantResult:
     status: Literal["available", "unavailable", "unknown"]
     inventory: int | None = None
+    reason: str | None = None
+
+
+class CheckUnknown(RuntimeError):
+    """Carry a fixed, non-sensitive reason code for an inconclusive check."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
 
 
 def _integer(value: Any, field: str) -> int:
@@ -104,7 +113,7 @@ def classify_payload(
             raise ValueError("Available variant had no sellable inventory")
         return VariantResult("available", inventory)
     except ValueError:
-        return VariantResult("unknown")
+        return VariantResult("unknown", reason="payload")
 
 
 def _retry_delay(error: Exception, attempt: int) -> float:
@@ -128,10 +137,12 @@ def fetch_payload(
         "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
     )
     last_error: Exception | None = None
+    last_reason = "transport"
 
     for attempt in range(retries + 1):
         cookie_jar = CookieJar()
         opener = build_opener(HTTPCookieProcessor(cookie_jar))
+        phase = "bootstrap"
         try:
             bootstrap = Request(
                 bootstrap_url,
@@ -144,11 +155,12 @@ def fetch_payload(
             )
             with opener.open(bootstrap, timeout=timeout) as response:
                 if getattr(response, "status", 200) != 200:
-                    raise RuntimeError("Bootstrap returned an unexpected status")
+                    raise CheckUnknown("bootstrap-status")
                 response.read(1)
             if not list(cookie_jar):
-                raise RuntimeError("Bootstrap did not establish a session")
+                raise CheckUnknown("bootstrap-session")
 
+            phase = "api"
             request = Request(
                 api_url,
                 headers={
@@ -161,12 +173,13 @@ def fetch_payload(
             )
             with opener.open(request, timeout=timeout) as response:
                 if getattr(response, "status", 200) != 200:
-                    raise RuntimeError("API returned an unexpected status")
+                    raise CheckUnknown("api-status")
                 body = response.read(5_000_001)
                 if len(body) > 5_000_000:
-                    raise RuntimeError("API response exceeded the size limit")
+                    raise CheckUnknown("api-size")
                 return json.loads(body.decode("utf-8"))
         except (
+            CheckUnknown,
             HTTPError,
             URLError,
             TimeoutError,
@@ -175,6 +188,14 @@ def fetch_payload(
             json.JSONDecodeError,
         ) as error:
             last_error = error
+            if isinstance(error, CheckUnknown):
+                last_reason = error.reason
+            elif isinstance(error, HTTPError):
+                last_reason = f"{phase}-http-{error.code}"
+            elif isinstance(error, (UnicodeDecodeError, json.JSONDecodeError)):
+                last_reason = f"{phase}-format"
+            else:
+                last_reason = f"{phase}-transport"
             retryable = not isinstance(error, HTTPError) or error.code in {
                 401,
                 408,
@@ -190,7 +211,7 @@ def fetch_payload(
                 continue
             break
 
-    raise RuntimeError("Could not fetch a valid private-target response") from last_error
+    raise CheckUnknown(last_reason) from last_error
 
 
 def append_github_output(path: str | None, result: VariantResult) -> None:
@@ -282,13 +303,18 @@ def main(argv: list[str] | None = None) -> int:
             result = (
                 confirmation
                 if confirmation.status == "available"
-                else VariantResult("unknown")
+                else VariantResult("unknown", reason="confirmation")
             )
+    except CheckUnknown as error:
+        result = VariantResult("unknown", reason=error.reason)
     except Exception:
-        result = VariantResult("unknown")
+        result = VariantResult("unknown", reason="internal")
 
     append_github_output(args.github_output, result)
-    print(json.dumps({"checked_at": checked_at, "status": result.status}, indent=2))
+    public_result = {"checked_at": checked_at, "status": result.status}
+    if result.reason:
+        public_result["reason"] = result.reason
+    print(json.dumps(public_result, indent=2))
     return 0 if result.status in {"available", "unavailable"} else 2
 
 

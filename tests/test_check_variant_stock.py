@@ -180,6 +180,29 @@ class VariantMainTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, public_text)
         self.assertIn('"status": "unknown"', public_text)
+        self.assertIn('"reason": "internal"', public_text)
+
+    def test_safe_fetch_reason_is_reported_without_private_values(self) -> None:
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, "output")
+            with (
+                mock.patch.dict(os.environ, self.private_env(), clear=True),
+                mock.patch.object(
+                    check_variant_stock,
+                    "fetch_payload",
+                    side_effect=check_variant_stock.CheckUnknown("api-http-401"),
+                ),
+                redirect_stdout(stdout),
+            ):
+                code = check_variant_stock.main(
+                    ["--github-output", str(output)]
+                )
+                output_text = output.read_text()
+
+        self.assertEqual(code, 2)
+        self.assertIn('"reason": "api-http-401"', stdout.getvalue())
+        self.assertEqual(output_text, "status=unknown\n")
 
     def test_unconfirmed_positive_result_becomes_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
