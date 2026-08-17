@@ -15,7 +15,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check-availability:
+  item-1:
+    name: Check item 1
     runs-on: ubuntu-slim
     timeout-minutes: 3
     steps:
@@ -26,7 +27,8 @@ jobs:
           persist-credentials: false
 
       - name: Check availability
-        id: stock
+        id: check
+        continue-on-error: true
         env:
           MONITOR_API_URL: ${{ secrets.MONITOR_API_URL }}
           MONITOR_PRODUCT_ID: ${{ secrets.MONITOR_PRODUCT_ID }}
@@ -34,21 +36,91 @@ jobs:
           MONITOR_PRODUCT_SLUG: ${{ secrets.MONITOR_PRODUCT_SLUG }}
         run: python3 scripts/check_stock.py --github-output "$GITHUB_OUTPUT"
 
-      - name: Create or close the stock-alert issue
+      - name: Create or close alert
         id: alert
+        if: >-
+          always() &&
+          (steps.check.outputs.status == 'available' ||
+          steps.check.outputs.status == 'unavailable')
         env:
-          STOCK_STATUS: ${{ steps.stock.outputs.status }}
+          STOCK_STATUS: ${{ steps.check.outputs.status }}
           GITHUB_TOKEN: ${{ github.token }}
           ALERT_ASSIGNEE: ${{ vars.ALERT_ASSIGNEE || github.actor }}
-        run: python3 scripts/sync_github_issue.py --github-output "$GITHUB_OUTPUT"
+        run: >-
+          python3 scripts/sync_github_issue.py --slot 1
+          --github-output "$GITHUB_OUTPUT"
 
-      - name: Write job summary
+      - name: Write item 1 summary
+        if: always()
         env:
-          STOCK_STATUS: ${{ steps.stock.outputs.status }}
+          ITEM_STATUS: ${{ steps.check.outputs.status }}
           ALERT_ACTION: ${{ steps.alert.outputs.action }}
           ISSUE_URL: ${{ steps.alert.outputs.issue_url }}
         run: |
-          echo "## Private-target availability check" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Status: **$STOCK_STATUS**" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Alert action: **$ALERT_ACTION**" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "$ISSUE_URL" ]; then echo "- Alert: $ISSUE_URL" >> "$GITHUB_STEP_SUMMARY"; fi
+          echo "## Private item 1 check" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: **${ITEM_STATUS:-unknown}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Alert: ${ALERT_ACTION:-none}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ISSUE_URL" ]; then echo "- Issue: $ISSUE_URL" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Fail on an inconclusive check
+        if: >-
+          always() &&
+          !contains(fromJSON('["available", "unavailable"]'), steps.check.outputs.status)
+        run: |
+          echo "Private item 1 could not be checked conclusively." >&2
+          exit 1
+
+  item-2:
+    name: Check item 2
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Check out monitor
+        # actions/checkout v6.0.2, pinned to an immutable commit.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Check availability
+        id: check
+        continue-on-error: true
+        env:
+          MONITOR_TARGET_2_BOOTSTRAP_URL: ${{ secrets.MONITOR_TARGET_2_BOOTSTRAP_URL }}
+          MONITOR_TARGET_2_API_URL: ${{ secrets.MONITOR_TARGET_2_API_URL }}
+          MONITOR_TARGET_2_ID: ${{ secrets.MONITOR_TARGET_2_ID }}
+          MONITOR_TARGET_2_VARIANT: ${{ secrets.MONITOR_TARGET_2_VARIANT }}
+        run: python3 scripts/check_variant_stock.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Create or close alert
+        id: alert
+        if: >-
+          always() &&
+          (steps.check.outputs.status == 'available' ||
+          steps.check.outputs.status == 'unavailable')
+        env:
+          STOCK_STATUS: ${{ steps.check.outputs.status }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ALERT_ASSIGNEE: ${{ vars.ALERT_ASSIGNEE || github.actor }}
+        run: >-
+          python3 scripts/sync_github_issue.py --slot 2
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Write item 2 summary
+        if: always()
+        env:
+          ITEM_STATUS: ${{ steps.check.outputs.status }}
+          ALERT_ACTION: ${{ steps.alert.outputs.action }}
+          ISSUE_URL: ${{ steps.alert.outputs.issue_url }}
+        run: |
+          echo "## Private item 2 check" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: **${ITEM_STATUS:-unknown}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Alert: ${ALERT_ACTION:-none}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ISSUE_URL" ]; then echo "- Issue: $ISSUE_URL" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Fail on an inconclusive check
+        if: >-
+          always() &&
+          !contains(fromJSON('["available", "unavailable"]'), steps.check.outputs.status)
+        run: |
+          echo "Private item 2 could not be checked conclusively." >&2
+          exit 1
