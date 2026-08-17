@@ -6,7 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,7 +18,12 @@ from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import (
+    HTTPCookieProcessor,
+    HTTPRedirectHandler,
+    Request,
+    build_opener,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,13 @@ class CheckUnknown(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(reason)
+
+
+class NoRedirectHandler(HTTPRedirectHandler):
+    """Keep private headers and cookies on their explicitly configured hosts."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 def _integer(value: Any, field: str) -> int:
@@ -124,24 +140,32 @@ def _retry_delay(error: Exception, attempt: int) -> float:
     return min(float(2**attempt), 4.0)
 
 
-def fetch_payload(
-    bootstrap_url: str,
-    api_url: str,
-    *,
-    timeout: float,
-    retries: int,
-) -> Any:
-    """Create an anonymous session, then retrieve the configured JSON payload."""
-    user_agent = (
+def _user_agent() -> str:
+    return (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
     )
+
+
+def _fetch_payload_with_urllib(
+    bootstrap_url: str,
+    api_url: str,
+    *,
+    bootstrap_headers: dict[str, str],
+    timeout: float,
+    retries: int,
+) -> Any:
+    """Retrieve the payload with the Python standard-library transport."""
+    user_agent = _user_agent()
     last_error: Exception | None = None
     last_reason = "transport"
 
     for attempt in range(retries + 1):
         cookie_jar = CookieJar()
-        opener = build_opener(HTTPCookieProcessor(cookie_jar))
+        opener = build_opener(
+            HTTPCookieProcessor(cookie_jar),
+            NoRedirectHandler(),
+        )
         phase = "bootstrap"
         try:
             bootstrap = Request(
@@ -150,6 +174,7 @@ def fetch_payload(
                     "Accept": "text/html,application/xhtml+xml",
                     "Cache-Control": "no-cache",
                     "User-Agent": user_agent,
+                    **bootstrap_headers,
                 },
                 method="GET",
             )
@@ -214,6 +239,128 @@ def fetch_payload(
     raise CheckUnknown(last_reason) from last_error
 
 
+def _fetch_payload_with_curl(
+    bootstrap_url: str,
+    api_url: str,
+    *,
+    bootstrap_headers: dict[str, str],
+    timeout: float,
+    retries: int,
+) -> Any:
+    """Retry through curl when a storefront rejects the default TLS client."""
+    curl = shutil.which("curl")
+    if not curl:
+        raise CheckUnknown("curl-missing")
+
+    common = [
+        curl,
+        "--http1.1",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--compressed",
+        "--retry",
+        str(retries),
+        "--retry-all-errors",
+        "--connect-timeout",
+        str(min(timeout, 10.0)),
+        "--max-time",
+        str(timeout),
+        "--user-agent",
+        _user_agent(),
+    ]
+    process_timeout = max((retries + 1) * (timeout + 5.0), 15.0)
+    private_header_args = [
+        part
+        for name, value in bootstrap_headers.items()
+        for part in ("--header", f"{name}: {value}")
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="private-monitor-") as directory:
+        cookie_path = str(Path(directory, "cookies.txt"))
+        try:
+            bootstrap = subprocess.run(
+                [
+                    *common,
+                    "--header",
+                    "Accept: text/html,application/xhtml+xml",
+                    "--header",
+                    "Cache-Control: no-cache",
+                    *private_header_args,
+                    "--cookie-jar",
+                    cookie_path,
+                    "--output",
+                    os.devnull,
+                    bootstrap_url,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=process_timeout,
+            )
+            if bootstrap.returncode != 0:
+                raise CheckUnknown("curl-bootstrap")
+
+            response = subprocess.run(
+                [
+                    *common,
+                    "--header",
+                    "Accept: application/json",
+                    "--header",
+                    "Cache-Control: no-cache",
+                    "--header",
+                    f"Referer: {bootstrap_url}",
+                    "--cookie",
+                    cookie_path,
+                    api_url,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=process_timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise CheckUnknown("curl-timeout") from error
+
+    if response.returncode != 0:
+        raise CheckUnknown("curl-api")
+    if len(response.stdout) > 5_000_000:
+        raise CheckUnknown("curl-size")
+    try:
+        return json.loads(response.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CheckUnknown("curl-format") from error
+
+
+def fetch_payload(
+    bootstrap_url: str,
+    api_url: str,
+    *,
+    bootstrap_headers: dict[str, str],
+    timeout: float,
+    retries: int,
+) -> Any:
+    """Create an anonymous session, then retrieve the configured JSON payload."""
+    try:
+        return _fetch_payload_with_urllib(
+            bootstrap_url,
+            api_url,
+            bootstrap_headers=bootstrap_headers,
+            timeout=timeout,
+            retries=retries,
+        )
+    except CheckUnknown as error:
+        if error.reason == "api-size":
+            raise
+        return _fetch_payload_with_curl(
+            bootstrap_url,
+            api_url,
+            bootstrap_headers=bootstrap_headers,
+            timeout=timeout,
+            retries=retries,
+        )
+
+
 def append_github_output(path: str | None, result: VariantResult) -> None:
     if not path:
         return
@@ -223,11 +370,14 @@ def append_github_output(path: str | None, result: VariantResult) -> None:
 
 def required_private_configuration(
     parser: argparse.ArgumentParser,
-) -> tuple[str, str, int, str]:
+) -> tuple[str, str, int, str, dict[str, str]]:
     bootstrap_url = os.environ.get("MONITOR_TARGET_2_BOOTSTRAP_URL", "").strip()
     api_url = os.environ.get("MONITOR_TARGET_2_API_URL", "").strip()
     expected_id_raw = os.environ.get("MONITOR_TARGET_2_ID", "").strip()
     desired_variant = os.environ.get("MONITOR_TARGET_2_VARIANT", "").strip()
+    bootstrap_headers_raw = os.environ.get(
+        "MONITOR_TARGET_2_BOOTSTRAP_HEADERS", ""
+    ).strip()
 
     missing = [
         name
@@ -246,7 +396,47 @@ def required_private_configuration(
     except ValueError:
         parser.error("MONITOR_TARGET_2_ID must be an integer")
 
-    return bootstrap_url, api_url, expected_id, desired_variant
+    bootstrap_headers: dict[str, str] = {}
+    if bootstrap_headers_raw:
+        try:
+            value = json.loads(bootstrap_headers_raw)
+        except json.JSONDecodeError:
+            parser.error(
+                "MONITOR_TARGET_2_BOOTSTRAP_HEADERS must be a JSON object"
+            )
+        if not isinstance(value, dict) or len(value) > 12:
+            parser.error(
+                "MONITOR_TARGET_2_BOOTSTRAP_HEADERS must be a JSON object"
+            )
+        header_name = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+        forbidden = {"content-length", "cookie", "host", "set-cookie"}
+        for name, header_value in value.items():
+            valid_value = (
+                isinstance(header_value, str)
+                and bool(header_value)
+                and all(
+                    32 <= ord(character) <= 126
+                    for character in header_value
+                )
+            )
+            if (
+                not isinstance(name, str)
+                or not header_name.fullmatch(name)
+                or name.lower() in forbidden
+                or not valid_value
+            ):
+                parser.error(
+                    "MONITOR_TARGET_2_BOOTSTRAP_HEADERS is invalid"
+                )
+            bootstrap_headers[name] = header_value
+
+    return (
+        bootstrap_url,
+        api_url,
+        expected_id,
+        desired_variant,
+        bootstrap_headers,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -270,15 +460,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    bootstrap_url, api_url, expected_id, desired_variant = (
-        required_private_configuration(parser)
-    )
+    (
+        bootstrap_url,
+        api_url,
+        expected_id,
+        desired_variant,
+        bootstrap_headers,
+    ) = required_private_configuration(parser)
     checked_at = datetime.now(timezone.utc).isoformat()
 
     try:
         payload = fetch_payload(
             bootstrap_url,
             api_url,
+            bootstrap_headers=bootstrap_headers,
             timeout=args.timeout,
             retries=args.retries,
         )
@@ -292,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             confirmation_payload = fetch_payload(
                 bootstrap_url,
                 api_url,
+                bootstrap_headers=bootstrap_headers,
                 timeout=args.timeout,
                 retries=args.retries,
             )

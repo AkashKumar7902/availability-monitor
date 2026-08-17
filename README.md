@@ -19,6 +19,7 @@ The repository deliberately keeps these details private:
 - item SKU
 - item slug
 - desired size or variant
+- private session headers
 - retailer and item name
 
 The public workflow reveals only an item number and `available`, `unavailable`,
@@ -47,6 +48,7 @@ Item 2 uses an anonymous storefront session and monitors one exact variant:
 | Secret | Private value |
 |---|---|
 | `MONITOR_TARGET_2_BOOTSTRAP_URL` | Page that establishes the anonymous session |
+| `MONITOR_TARGET_2_BOOTSTRAP_HEADERS` | Optional JSON object of private session headers |
 | `MONITOR_TARGET_2_API_URL` | Complete JSON API endpoint for item 2 |
 | `MONITOR_TARGET_2_ID` | Expected numeric item ID |
 | `MONITOR_TARGET_2_VARIANT` | Exact size or variant label to monitor |
@@ -60,6 +62,7 @@ gh secret set MONITOR_PRODUCT_ID
 gh secret set MONITOR_PRODUCT_SKU
 gh secret set MONITOR_PRODUCT_SLUG
 gh secret set MONITOR_TARGET_2_BOOTSTRAP_URL
+gh secret set MONITOR_TARGET_2_BOOTSTRAP_HEADERS
 gh secret set MONITOR_TARGET_2_API_URL
 gh secret set MONITOR_TARGET_2_ID
 gh secret set MONITOR_TARGET_2_VARIANT

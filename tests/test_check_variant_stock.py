@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -118,6 +119,9 @@ class VariantMainTests(unittest.TestCase):
             "MONITOR_TARGET_2_API_URL": "https://private.invalid/secret-target",
             "MONITOR_TARGET_2_ID": str(TEST_ID),
             "MONITOR_TARGET_2_VARIANT": TEST_VARIANT,
+            "MONITOR_TARGET_2_BOOTSTRAP_HEADERS": (
+                '{"X-Private-Test":"PRIVATE-HEADER-SENTINEL"}'
+            ),
         }
 
     def test_positive_result_is_confirmed_twice(self) -> None:
@@ -177,8 +181,15 @@ class VariantMainTests(unittest.TestCase):
             private_values["MONITOR_TARGET_2_BOOTSTRAP_URL"],
             private_values["MONITOR_TARGET_2_API_URL"],
             private_values["MONITOR_TARGET_2_VARIANT"],
+            private_values["MONITOR_TARGET_2_BOOTSTRAP_HEADERS"],
         ):
             self.assertNotIn(secret, public_text)
+        private_headers = json.loads(
+            private_values["MONITOR_TARGET_2_BOOTSTRAP_HEADERS"]
+        )
+        for name, value in private_headers.items():
+            self.assertNotIn(name, public_text)
+            self.assertNotIn(value, public_text)
         self.assertIn('"status": "unknown"', public_text)
         self.assertIn('"reason": "internal"', public_text)
 
@@ -232,6 +243,47 @@ class VariantMainTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn('"status": "unknown"', stdout.getvalue())
         self.assertEqual(output_text, "status=unknown\n")
+
+    def test_fetch_falls_back_to_curl_after_transport_rejection(self) -> None:
+        expected = payload()
+        with (
+            mock.patch.object(
+                check_variant_stock,
+                "_fetch_payload_with_urllib",
+                side_effect=check_variant_stock.CheckUnknown(
+                    "bootstrap-transport"
+                ),
+            ) as urllib_fetch,
+            mock.patch.object(
+                check_variant_stock,
+                "_fetch_payload_with_curl",
+                return_value=expected,
+            ) as curl_fetch,
+        ):
+            actual = check_variant_stock.fetch_payload(
+                "https://private.invalid/start",
+                "https://private.invalid/target",
+                bootstrap_headers={"X-Private-Test": "secret"},
+                timeout=5,
+                retries=1,
+            )
+
+        self.assertEqual(actual, expected)
+        urllib_fetch.assert_called_once()
+        curl_fetch.assert_called_once()
+
+    def test_private_headers_are_never_forwarded_through_redirects(self) -> None:
+        handler = check_variant_stock.NoRedirectHandler()
+        redirected = handler.redirect_request(
+            None,
+            None,
+            302,
+            "redirect",
+            {},
+            "https://redirect.invalid/",
+        )
+
+        self.assertIsNone(redirected)
 
 
 if __name__ == "__main__":
