@@ -122,6 +122,9 @@ class VariantMainTests(unittest.TestCase):
             "MONITOR_TARGET_2_BOOTSTRAP_HEADERS": (
                 '{"X-Private-Test":"PRIVATE-HEADER-SENTINEL"}'
             ),
+            "MONITOR_TARGET_2_API_HEADERS": (
+                '{"X-Private-API":"PRIVATE-API-SENTINEL"}'
+            ),
         }
 
     def test_positive_result_is_confirmed_twice(self) -> None:
@@ -182,14 +185,19 @@ class VariantMainTests(unittest.TestCase):
             private_values["MONITOR_TARGET_2_API_URL"],
             private_values["MONITOR_TARGET_2_VARIANT"],
             private_values["MONITOR_TARGET_2_BOOTSTRAP_HEADERS"],
+            private_values["MONITOR_TARGET_2_API_HEADERS"],
         ):
             self.assertNotIn(secret, public_text)
         private_headers = json.loads(
             private_values["MONITOR_TARGET_2_BOOTSTRAP_HEADERS"]
         )
-        for name, value in private_headers.items():
-            self.assertNotIn(name, public_text)
-            self.assertNotIn(value, public_text)
+        private_api_headers = json.loads(
+            private_values["MONITOR_TARGET_2_API_HEADERS"]
+        )
+        for headers in (private_headers, private_api_headers):
+            for name, value in headers.items():
+                self.assertNotIn(name, public_text)
+                self.assertNotIn(value, public_text)
         self.assertIn('"status": "unknown"', public_text)
         self.assertIn('"reason": "internal"', public_text)
 
@@ -264,6 +272,7 @@ class VariantMainTests(unittest.TestCase):
                 "https://private.invalid/start",
                 "https://private.invalid/target",
                 bootstrap_headers={"X-Private-Test": "secret"},
+                api_headers={"X-Private-API": "secret"},
                 timeout=5,
                 retries=1,
             )
@@ -271,6 +280,128 @@ class VariantMainTests(unittest.TestCase):
         self.assertEqual(actual, expected)
         urllib_fetch.assert_called_once()
         curl_fetch.assert_called_once()
+
+    def test_private_cookie_can_supply_a_preestablished_session(self) -> None:
+        expected = payload()
+
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, body: bytes) -> None:
+                self.body = body
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self, size: int = -1) -> bytes:
+                return self.body if size < 0 else self.body[:size]
+
+        opener = mock.Mock()
+        opener.open.side_effect = [
+            FakeResponse(b"{}"),
+            FakeResponse(json.dumps(expected).encode()),
+        ]
+        with mock.patch.object(
+            check_variant_stock,
+            "build_opener",
+            return_value=opener,
+        ):
+            actual = check_variant_stock._fetch_payload_with_urllib(
+                "https://private.invalid/start",
+                "https://private.invalid/target",
+                bootstrap_headers={"Cookie": "PRIVATE-BOOTSTRAP-SENTINEL"},
+                api_headers={"Cookie": "PRIVATE-API-SENTINEL"},
+                timeout=5,
+                retries=0,
+            )
+
+        self.assertEqual(actual, expected)
+        bootstrap_request = opener.open.call_args_list[0].args[0]
+        api_request = opener.open.call_args_list[1].args[0]
+        self.assertEqual(
+            bootstrap_request.get_header("Cookie"),
+            "PRIVATE-BOOTSTRAP-SENTINEL",
+        )
+        self.assertEqual(
+            api_request.get_header("Cookie"),
+            "PRIVATE-API-SENTINEL",
+        )
+
+    def test_curl_keeps_bootstrap_and_api_headers_separate(self) -> None:
+        expected = payload()
+        bootstrap_process = mock.Mock(returncode=0, stdout=b"", stderr=b"")
+        api_process = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(expected).encode(),
+            stderr=b"",
+        )
+        with (
+            mock.patch.object(
+                check_variant_stock.shutil,
+                "which",
+                return_value="/usr/bin/curl",
+            ),
+            mock.patch.object(
+                check_variant_stock.subprocess,
+                "run",
+                side_effect=[bootstrap_process, api_process],
+            ) as run,
+        ):
+            actual = check_variant_stock._fetch_payload_with_curl(
+                "https://private.invalid/start",
+                "https://private.invalid/target",
+                bootstrap_headers={
+                    "Cookie": "PRIVATE-BOOTSTRAP-SENTINEL",
+                    "accept": "application/private-bootstrap",
+                },
+                api_headers={
+                    "Cookie": "PRIVATE-API-SENTINEL",
+                    "referer": "https://private.invalid/private-referrer",
+                },
+                timeout=5,
+                retries=0,
+            )
+
+        self.assertEqual(actual, expected)
+        bootstrap_command = run.call_args_list[0].args[0]
+        api_command = run.call_args_list[1].args[0]
+        self.assertIn("Cookie: PRIVATE-BOOTSTRAP-SENTINEL", bootstrap_command)
+        self.assertNotIn("Cookie: PRIVATE-API-SENTINEL", bootstrap_command)
+        self.assertIn("Cookie: PRIVATE-API-SENTINEL", api_command)
+        self.assertNotIn("Cookie: PRIVATE-BOOTSTRAP-SENTINEL", api_command)
+        self.assertNotIn("--cookie", api_command)
+        bootstrap_accept = [
+            value
+            for value in bootstrap_command
+            if value.lower().startswith("accept:")
+        ]
+        api_referer = [
+            value
+            for value in api_command
+            if value.lower().startswith("referer:")
+        ]
+        self.assertEqual(
+            bootstrap_accept,
+            ["accept: application/private-bootstrap"],
+        )
+        self.assertEqual(
+            api_referer,
+            ["referer: https://private.invalid/private-referrer"],
+        )
+
+    def test_header_merge_is_case_insensitive(self) -> None:
+        merged = check_variant_stock._merge_headers(
+            {"Accept": "default", "Referer": "default"},
+            {"accept": "private", "referer": "private"},
+        )
+
+        self.assertEqual(
+            {name.lower(): value for name, value in merged.items()},
+            {"accept": "private", "referer": "private"},
+        )
 
     def test_private_headers_are_never_forwarded_through_redirects(self) -> None:
         handler = check_variant_stock.NoRedirectHandler()

@@ -50,6 +50,7 @@ Item 2 uses an anonymous storefront session and monitors one exact variant:
 | `MONITOR_TARGET_2_BOOTSTRAP_URL` | Page that establishes the anonymous session |
 | `MONITOR_TARGET_2_BOOTSTRAP_HEADERS` | Optional JSON object of private session headers |
 | `MONITOR_TARGET_2_API_URL` | Complete JSON API endpoint for item 2 |
+| `MONITOR_TARGET_2_API_HEADERS` | Optional JSON object of private API headers |
 | `MONITOR_TARGET_2_ID` | Expected numeric item ID |
 | `MONITOR_TARGET_2_VARIANT` | Exact size or variant label to monitor |
 
@@ -64,9 +65,14 @@ gh secret set MONITOR_PRODUCT_SLUG
 gh secret set MONITOR_TARGET_2_BOOTSTRAP_URL
 gh secret set MONITOR_TARGET_2_BOOTSTRAP_HEADERS
 gh secret set MONITOR_TARGET_2_API_URL
+gh secret set MONITOR_TARGET_2_API_HEADERS
 gh secret set MONITOR_TARGET_2_ID
 gh secret set MONITOR_TARGET_2_VARIANT
 ```
+
+If item 2 uses a pre-established anonymous session header, rotate that encrypted
+value before its provider-defined expiry. An expired or rejected session reports
+`unknown` and never closes an existing availability alert.
 
 The alert defaults to the user who runs the workflow. To choose another
 collaborator, create a non-sensitive repository variable named

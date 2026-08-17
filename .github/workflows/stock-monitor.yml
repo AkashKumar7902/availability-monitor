@@ -88,6 +88,7 @@ jobs:
           MONITOR_TARGET_2_BOOTSTRAP_URL: ${{ secrets.MONITOR_TARGET_2_BOOTSTRAP_URL }}
           MONITOR_TARGET_2_BOOTSTRAP_HEADERS: ${{ secrets.MONITOR_TARGET_2_BOOTSTRAP_HEADERS }}
           MONITOR_TARGET_2_API_URL: ${{ secrets.MONITOR_TARGET_2_API_URL }}
+          MONITOR_TARGET_2_API_HEADERS: ${{ secrets.MONITOR_TARGET_2_API_HEADERS }}
           MONITOR_TARGET_2_ID: ${{ secrets.MONITOR_TARGET_2_ID }}
           MONITOR_TARGET_2_VARIANT: ${{ secrets.MONITOR_TARGET_2_VARIANT }}
         run: python3 scripts/check_variant_stock.py --github-output "$GITHUB_OUTPUT"
