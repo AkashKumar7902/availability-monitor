@@ -15,8 +15,14 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
-MARKER = "<!-- availability-monitor:alert -->"
-ISSUE_TITLE = "✅ Monitored item is available"
+MARKERS = {
+    "1": "<!-- availability-monitor:alert -->",
+    "2": "<!-- availability-monitor:alert:2 -->",
+}
+
+
+def issue_title(slot: str) -> str:
+    return f"✅ Monitored item {slot} is available"
 
 
 class GitHubAPIError(RuntimeError):
@@ -55,7 +61,11 @@ class GitHubClient:
             body = error.read().decode("utf-8", errors="replace")
             raise GitHubAPIError(error.code, body) from error
 
-    def matching_open_issues(self) -> list[dict[str, Any]]:
+    def matching_open_issues(
+        self,
+        marker: str,
+        title: str,
+    ) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
         page = 1
         while True:
@@ -69,7 +79,13 @@ class GitHubClient:
             matches.extend(
                 issue
                 for issue in issues
-                if "pull_request" not in issue and MARKER in (issue.get("body") or "")
+                if (
+                    "pull_request" not in issue
+                    and marker in (issue.get("body") or "")
+                    and issue.get("title") == title
+                    and isinstance(issue.get("user"), dict)
+                    and issue["user"].get("login") == "github-actions[bot]"
+                )
             )
             if len(issues) < 100:
                 return matches
@@ -85,12 +101,12 @@ def append_outputs(path: str | None, *, action: str, issue_url: str) -> None:
         output.write(f"issue_url={issue_url}\n")
 
 
-def issue_body(assignee: str) -> str:
+def issue_body(slot: str, assignee: str) -> str:
     checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lead = f"@{assignee} — " if assignee else ""
-    return f"""{MARKER}
+    return f"""{MARKERS[slot]}
 
-{lead}the privately configured item is **available**.
+{lead}privately configured item {slot} is **available**.
 
 - Checked: {checked_at}
 
@@ -101,12 +117,14 @@ this public issue. This alert closes automatically when the item becomes unavail
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--slot", choices=sorted(MARKERS), default="1")
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    slot = args.slot
     status = os.environ.get("STOCK_STATUS", "")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -119,14 +137,15 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("GITHUB_REPOSITORY and GITHUB_TOKEN are required")
 
     client = GitHubClient(api_url, repository, token)
-    open_issues = client.matching_open_issues()
+    title = issue_title(slot)
+    open_issues = client.matching_open_issues(MARKERS[slot], title)
     action = "none"
     issue_url = open_issues[0].get("html_url", "") if open_issues else ""
 
     if status == "available" and not open_issues:
         payload: dict[str, Any] = {
-            "title": ISSUE_TITLE,
-            "body": issue_body(assignee),
+            "title": title,
+            "body": issue_body(slot, assignee),
         }
         if assignee:
             payload["assignees"] = [assignee]
